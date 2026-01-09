@@ -1,0 +1,613 @@
+wget https://download.moodle.org/download.php/direct/stable500/moodle-latest-500.tgz
+
+APACHE
+
+
+dnf install -y epel-release
+dnf install -y https://rpms.remirepo.net/enterprise/remi-release-8.rpm
+
+# Reset PHP module and enable PHP 8.2 from Remi
+dnf module reset php -y
+dnf module enable php:remi-8.2 -y
+
+# Install PHP and all required extensions for Moodle
+dnf install -y \
+    php \
+    php-cli \
+    php-fpm \
+    php-mysqlnd \
+    php-gd \
+    php-intl \
+    php-xmlrpc \
+    php-soap \
+    php-zip \
+    php-mbstring \
+    php-opcache \
+    php-curl \
+    php-ldap \
+    php-xml \
+    php-json \
+    php-iconv
+
+# Verify PHP installation and version
+php --version
+
+
+
+# Create Moodle application directory
+mkdir -p /var/www/moodle
+
+# Create Moodle data directory (outside web root for security)
+mkdir -p /var/moodledata
+
+# Set correct permissions for Apache
+chown -R apache:apache /var/www/moodle
+chown -R apache:apache /var/moodledata
+chmod -R 755 /var/www/moodle
+chmod -R 770 /var/moodledata
+
+
+# Edit PHP configuration
+nano /etc/php.ini
+
+# Find and modify these settings:
+# max_input_vars = 5000
+# memory_limit = 256M
+# upload_max_filesize = 128M
+# post_max_size = 128M
+# default_timezone = "Europe/Skopje"  (or your timezone)
+# display_errors = Off  (for production)
+
+
+
+
+
+Listen 8088
+
+<VirtualHost *:8088>
+    ServerName moodle.ans232045:8088
+    
+    DocumentRoot /var/www/moodle
+    
+    <Directory /var/www/moodle>
+        AllowOverride All
+        Require all granted
+    </Directory>
+    
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost"
+    </FilesMatch>
+    
+    ErrorLog /var/log/httpd/moodle_8088_error.log
+    CustomLog /var/log/httpd/moodle_8088_access.log combined
+</VirtualHost>
+
+
+
+
+
+
+
+
+
+
+NGINX
+
+
+
+
+
+
+cat > /etc/nginx/conf.d/moodle8088.conf << 'EOF'
+server {
+    listen 8088;
+    listen [::]:8088;
+    
+    server_name moodle.ans232045 192.168.100.159;
+    
+    root /var/www/moodle;
+    index index.php;
+    
+    client_max_body_size 128M;
+    
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php-fpm/www.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_buffer_size 128k;
+        fastcgi_buffers 256 4k;
+    }
+    
+    location ~ /\. {
+        deny all;
+    }
+    
+    location ~ ^/vendor/ {
+        deny all;
+    }
+}
+EOF
+
+# Test config
+nginx -t
+
+# Restart
+systemctl restart nginx
+Step 4: Update Firewall
+bash
+firewall-cmd --zone=public --add-port=8088/tcp --permanent
+firewall-cmd --reload
+Step 5: Update Moodle config.php
+bash
+cat > /var/www/moodle/config.php << 'EOF'
+<?php
+unset($CFG);
+global $CFG;
+$CFG = new stdClass();
+
+$CFG->dbtype    = 'mariadb';
+$CFG->dblibrary = 'native';
+$CFG->dbhost    = 'localhost';
+$CFG->dbname    = 'moodle';
+$CFG->dbuser    = 'moodleuser';
+$CFG->dbpass    = 'amonmarko';
+$CFG->prefix    = 'mdl_';
+$CFG->dboptions = array(
+    'dbpersist' => 0,
+    'dbsocket' => false,
+    'dbcollation' => 'utf8mb4_unicode_ci',
+);
+
+$CFG->wwwroot   = 'http://192.168.100.159:8088';
+$CFG->dataroot  = '/var/moodledata';
+$CFG->admin     = 'admin';
+$CFG->directorypermissions = 02777;
+
+@error_reporting(E_ALL | E_STRICT);
+@ini_set('display_errors', '0');
+@ini_set('log_errors', '1');
+@ini_set('error_log', '/var/log/moodle.log');
+
+require_once(__DIR__ . '/lib/setup.php');
+EOF
+
+chmod 666 /var/www/moodle/config.php
+chown apache:apache /var/www/moodle/config.php
+Step 6: Verify MariaDB and Moodle Database
+bash
+systemctl status mariadb
+
+mysql -u root << 'EOF'
+CREATE DATABASE IF NOT EXISTS moodle CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'moodleuser'@'localhost' IDENTIFIED BY 'amonmarko';
+GRANT ALL PRIVILEGES ON moodle.* TO 'moodleuser'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+EOF
+
+
+
+5.1 Install NFS Client Software
+bash
+# Install NFS utilities
+dnf install -y nfs-utils nfs4-acl-tools
+
+# Enable RPC service (required for NFS)
+systemctl enable --now rpcbind
+
+# Start NFS client service
+systemctl start nfs-client
+systemctl enable nfs-client
+5.2 Create Mount Point Directories
+bash
+# Create mount point for kolokvium (exam) files
+mkdir -p /nfs/jan2024
+
+# Create mount point for test files
+mkdir -p /nfs/proba2024
+
+# Set appropriate permissions
+chmod 755 /nfs
+chmod 755 /nfs/jan2024
+chmod 755 /nfs/proba2024
+5.3 Verify NFS Server Exports
+bash
+# List available NFS shares from the server
+showmount -e 10.10.16.200
+
+# Output should show:
+# /mnt/kolokvium_2024
+# /mnt/proba
+5.4 Mount NFS Shares (Temporary)
+Before adding to fstab, test the mounts to ensure they work:
+
+bash
+# Mount kolokvium directory
+mount -t nfs 10.10.16.200:/mnt/kolokvium_2024 /nfs/jan2024
+
+# Mount proba directory
+mount -t nfs 10.10.16.200:/mnt/proba /nfs/proba2024
+
+# Verify mounts are active
+df -h
+mount | grep nfs
+5.5 Configure Permanent Mounts in /etc/fstab
+To make these mounts persistent after reboot, add them to /etc/fstab:
+
+bash
+# Backup fstab first
+cp /etc/fstab /etc/fstab.backup
+
+# Edit fstab
+nano /etc/fstab
+
+# Add these lines at the end of the file:
+10.10.16.200:/mnt/kolokvium_2024 /nfs/jan2024 nfs defaults,nofail 0 0
+10.10.16.200:/mnt/proba /nfs/proba2024 nfs defaults,nofail 0 0
+fstab format explained:
+
+10.10.16.200:/mnt/kolokvium_2024 - Remote NFS path
+
+/nfs/jan2024 - Local mount point
+
+nfs - Filesystem type
+
+defaults,nofail - Options (nofail prevents boot issues if server is down)
+
+0 0 - Dump and fsck options
+
+5.6 Create Student Directory
+bash
+# Create your student directory in the mounted NFS share
+mkdir -p /nfs/jan2024/232045
+
+# Create a file with your choice of name
+touch /nfs/jan2024/232045/submission.txt
+echo "Student 232045 - Lab submission" > /nfs/jan2024/232045/submission.txt
+
+# Verify
+ls -la /nfs/jan2024/232045/
+cat /nfs/jan2024/232045/submission.txt
+
+firewall-cmd --zone=trusted --permanent --add-source=10.10.0.0/16
+
+
+options {
+    listen-on port 53 { 10.10.X.X; };
+    listen-on-v6 port 53 { none; };
+    directory "/var/named";
+    dump-file "/var/named/data/cache_dump.db";
+    statistics-file "/var/named/data/named_stats.txt";
+    memstatistics-file "/var/named/data/named_mem_stats.txt";
+    secroots-file "/var/named/data/named.secroots";
+    recursing-file "/var/named/data/named.recursing";
+    
+    # Allow queries from the entire network
+    allow-query { 10.10.0.0/16; };
+    allow-transfer { none; };
+    allow-recursion { 10.10.0.0/16; };
+    
+    # Configure forwarding to Cloudflare's DNS
+    forwarders {
+        1.0.0.1;
+        1.1.1.1;
+    };
+    forward only;
+    
+    dnssec-validation yes;
+    managed-keys-directory "/var/named/dynamic";
+    pid-file "/run/named/named.pid";
+    session-keyfile "/run/named/session.key";
+    include "/etc/crypto-policies/back-ends/bind.config";
+};
+
+logging {
+    channel default_debug {
+        file "data/named.run";
+        severity dynamic;
+    };
+};
+
+# Your zone configuration
+zone "232045.io.mk" IN {
+    type master;
+    file "232045.io.mk.zone";
+    allow-update { none; };
+};
+
+# Standard zones
+include "/etc/named.rfc1912.zones";
+include "/etc/named.root.key";
+
+
+
+Step 1: Enable Apache Modules
+bash
+a2enmod proxy
+a2enmod proxy_http
+a2enmod rewrite
+systemctl restart apache2
+Or on Rocky Linux:
+
+bash
+nano /etc/httpd/conf.modules.d/00-proxy.conf
+Uncomment:
+
+text
+LoadModule proxy_module modules/mod_proxy.so
+LoadModule proxy_http_module modules/mod_proxy_http.so
+Save: Ctrl+O, Enter, Ctrl+X
+
+Step 2: Create Apache VirtualHost as Reverse Proxy
+bash
+nano /etc/httpd/conf.d/wordpress-proxy.conf
+Paste:
+
+text
+<VirtualHost *:80>
+    ServerName wp.232045.com
+    ServerAlias wp.232045.com
+    
+    ProxyPreserveHost On
+    ProxyRequests Off
+    
+    <Location />
+        ProxyPass http://localhost:8080/
+        ProxyPassReverse http://localhost:8080/
+    </Location>
+    
+    ErrorLog /var/log/httpd/proxy_error.log
+    CustomLog /var/log/httpd/proxy_access.log combined
+</VirtualHost>
+Save: Ctrl+O, Enter, Ctrl+X
+
+Step 3: Verify and Restart
+bash
+apachectl configtest
+systemctl restart httpd
+Test:
+bash
+curl -I http://wp.232045.com
+Should proxy to localhost:8080
+
+REVERSE PROXY WITH NGINX
+Setup: Nginx as Reverse Proxy → Backend WordPress Server
+Backend WordPress running on: http://localhost:8080
+Reverse Proxy listening on: http://wp.232045.com (port 80)
+
+Step 1: Install Nginx
+bash
+dnf install -y nginx
+systemctl enable nginx
+systemctl start nginx
+Step 2: Create Nginx Reverse Proxy Config
+bash
+nano /etc/nginx/conf.d/wordpress-proxy.conf
+Paste:
+
+text
+upstream wordpress_backend {
+    server localhost:8080;
+}
+
+server {
+    listen 80;
+    server_name wp.232045.com;
+    
+    location / {
+        proxy_pass http://wordpress_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+    }
+    
+    error_log /var/log/nginx/proxy_error.log;
+    access_log /var/log/nginx/proxy_access.log;
+}
+Save: Ctrl+O, Enter, Ctrl+X
+
+Step 3: Verify and Restart
+bash
+nginx -t
+systemctl restart nginx
+Test:
+bash
+curl -I http://wp.232045.com
+
+
+
+sudo systemctl enable php-fpm
+sudo systemctl start php-fpm
+
+
+
+
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+chroot_local_user=YES
+chroot_list_enable=YES
+chroot_list_file=/etc/vsftpd/chroot_list
+pasv_enable=YES
+pasv_min_port=10000
+pasv_max_port=10100
+
+
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php-fpm/www.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+
+<FilesMatch \.php$>
+                SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost"
+
+
+        </FilesMatch>
+
+
+https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/5/html/deployment_guide/s2-bind-zone-examples
+
+
+
+WordPress on Rocky Linux 8
+1. TecMint - WordPress Installation Guide
+URL: 
+https://www.tecmint.com/install-wordpress-on-rocky-linux/
+
+Complete LAMP stack setup
+
+Step-by-step with Apache
+
+Database configuration
+
+Firewall rules included
+
+2. HowToForge - WordPress with LAMP & Let's Encrypt SSL
+URL: 
+https://www.howtoforge.com/how-to-install-wordpress-on-rocky-linux/
+
+Most comprehensive guide
+
+Includes free SSL certificates
+
+SELinux configuration
+
+Full security setup
+
+3. Tony Teaches Tech - WordPress on Nginx LEMP Server
+URL: 
+https://tonyteaches.tech/rocky-linux-wordpress-lemp/
+
+Nginx-based (closest to your lab!)
+
+PHP-FPM configuration
+
+Nginx server blocks
+
+Perfect for your setup
+
+4. Rocky Linux Official Documentation - WordPress on LAMP
+URL: 
+https://docs.rockylinux.org/10/guides/cms/wordpress-on-lamp/
+
+Official Rocky Linux documentation
+
+Well-structured and reliable
+
+Step-by-step walkthrough
+
+5. GeeksforGeeks - WordPress on Rocky Linux 9
+URL: 
+https://www.geeksforgeeks.org/linux-unix/how-to-install-wordpress-on-rocky-linux-9/
+
+Easy-to-follow format
+
+Works for Rocky 8 too
+
+Good for beginners
+
+Moodle on Rocky Linux 8
+1. HowToForge - Moodle eLearning Platform on Rocky Linux 8
+URL: 
+https://www.howtoforge.com/how-to-install-moodle-elearning-platform-on-rocky-linux-8/
+
+Most detailed guide
+
+Nginx + PHP-FPM setup
+
+SSL/Let's Encrypt included
+
+SELinux configuration
+
+Database setup
+
+Highly recommended! ⭐
+
+2. Shapehost - Moodle Setup on Rocky Linux 8
+URL: 
+https://shape.host/resources/how-to-set-up-moodle-elearning-platform-on-rocky-linux-8
+
+Comprehensive guide
+
+PHP 8.0 installation
+
+Database and Nginx config
+
+Clear step-by-step layout
+
+3. MainVPS - Moodle Installation Guide
+URL: 
+https://mainvps.net/blog/how-to-install-moodle-on-rocky-linux/
+
+LAMP stack focused
+
+Security best practices
+
+Easy to follow
+
+Recent guide (2025)
+
+4. Vultr Documentation - Moodle on Rocky Linux
+URL: 
+https://docs.vultr.com/how-to-install-moodle-on-rocky-linux-5850
+
+Professional documentation
+
+Step-by-step walkthrough
+
+System requirements checklist
+
+5. idroot - Moodle on Rocky Linux 9
+URL: 
+https://idroot.us/install-moodle-rocky-linux-9/
+
+Works for Rocky 8 too
+
+Comprehensive coverage
+
+All extensions included
+
+My Recommendations
+For WordPress:
+
+Best overall: HowToForge (with SSL)
+
+For Nginx like your lab: Tony Teaches Tech
+
+Official source: Rocky Linux Documentation
+
+For Moodle:
+
+Best overall: HowToForge (comprehensive) ⭐
+
+Most recent: MainVPS
+
+Professional: Vultr Docs
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
